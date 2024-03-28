@@ -2,29 +2,61 @@ import express from 'express';
 import { getResponse, createChain, createVectorStore }  from './llm.js'
 import bodyParser from 'body-parser'
 import { v4 as uuidv4 } from 'uuid';
-
+import multer  from 'multer'
+import { FilePaths } from './fileHandle.js';
+import { Chain } from './chains.js';
 
 const app = express();
+const upload = multer({ dest: 'uploads/' });
 
 app.use(express.json());
 app.use(bodyParser.urlencoded({extended: false}))
 
 const PORT = process.env.PORT || 3000; 
 
-// conversation with chat_id
 const conversationContexts = new Map();
+const newFile = new FilePaths();
+const newChain = new Chain();
 
-let chain;
+
+// upload a pdf
+app.post('/api/upload-pdf', upload.single('pdf'), async (req, res) => {
+    const conversationId = uuidv4();
+    conversationContexts.set(conversationId, {}); 
+    try {
+        const file = req.file; 
+        if (!file) {
+            throw new Error('No file uploaded');
+        }
+        const filePath = file.path;
+        newFile.setFilePath(filePath)
+        res.json({ filename: file.originalname, path: file.path, conversationId:conversationId});
+        console.log("File Uploaded Successfully")
+    } catch (error) {
+        console.error('Error uploading PDF:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 
 // start conversation
-app.post('/api/start-conversation', async (req, res) => {
+app.post('/api/create-vector-store/:conversationId', async (req, res) => {
     try {
-        const conversationId = uuidv4(); 
-        conversationContexts.set(conversationId, {}); 
-        const vectorStore = await createVectorStore()
+        const { conversationId } = req.params;
+
+        const conversationContext = conversationContexts.get(conversationId);
+
+        if (!conversationContext) {
+            throw new Error('Conversation ID is invalid');
+        }
+        
+        const filePath = newFile.getFilePath()
+        const vectorStore = await createVectorStore(conversationId,filePath)
+
         if(vectorStore) {
-            chain = await createChain(vectorStore);
-            res.json({ conversationId }); 
+            const chain = await createChain(vectorStore);
+            newChain.setChain(chain);
+            res.json({ conversationId, status:"vector store created successfully" }); 
             console.log({ conversationId })
         }
     } catch (error) {
@@ -48,16 +80,15 @@ app.post('/api/chat/:conversationId', async (req, res) => {
         if (!conversationContext) {
             throw new Error('Conversation ID is invalid');
         }
-        
+        const chain = newChain.getChain();
         const response = await getResponse(chain, question); 
         console.log({ conversationId, response })
-        res.json({ conversationId, response }); 
+        res.send({ conversationId, response }); 
     } catch (error) {
         console.error('Error processing request:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-
 
 
 app.listen(PORT, () => {

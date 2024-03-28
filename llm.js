@@ -9,39 +9,58 @@ import { createRetrievalChain } from 'langchain/chains/retrieval'
 import { AIMessage, HumanMessage} from '@langchain/core/messages'
 import { MessagesPlaceholder } from '@langchain/core/prompts'
 import { createHistoryAwareRetriever } from 'langchain/chains/history_aware_retriever'
+import { RedisVectorStore } from '@langchain/redis'
+import { createClient } from 'redis'
+
 
 import * as dotenv from 'dotenv';
+
 dotenv.config();
 
+const client = createClient();
+await client.connect();
 
-export const createVectorStore = async () => {
-    const pdfLoader = new PDFLoader(
-        "./docs/Anshul_Resume.pdf"
-    )
 
-    const docs = await pdfLoader.load();
-    // console.log(docs)
+export const createVectorStore = async (conversationId,filePath) => {
+
+    const vectorStoreFromRedis = new RedisVectorStore(new OpenAIEmbeddings(),
+        {
+            redisClient: client,
+            indexName: conversationId,
+        }
+    ) 
+   
+    const isVectorStorePresent = await vectorStoreFromRedis.checkIndexExists();
+
+    if(isVectorStorePresent) {
+        return vectorStoreFromRedis;
+    } else {
+        const pdfLoader = new PDFLoader(filePath);
+
+        const docs = await pdfLoader.load();
+       
+        const splitter = new RecursiveCharacterTextSplitter({
+            chunkSize: 200,
+            chunkOverlap: 20
+        });
     
-    const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: 200,
-        chunkOverlap: 20
-    });
-
-    const splitDocs = await splitter.splitDocuments(docs)
-    // console.log(splitDocs)
-
-    const embeddings = new OpenAIEmbeddings();
-
-    const vectorStore = await MemoryVectorStore.fromDocuments(
-        splitDocs,
-        embeddings
-    );
-
-    vectorStore.stora
-    // console.log(vectorStore)
-
-    return vectorStore;
+        const splitDocs = await splitter.splitDocuments(docs)
+        
+        const embeddings = new OpenAIEmbeddings();
+    
+        const vectorStore = await RedisVectorStore.fromDocuments(
+            splitDocs,
+            embeddings,
+            {
+                redisClient: client,
+                indexName: conversationId,
+            }
+        );
+        
+        return vectorStore; 
+    }
 }
+
 
 export const createChain = async (vectorStore) => {
     // create model
@@ -49,14 +68,6 @@ export const createChain = async (vectorStore) => {
         modelName: "gpt-3.5-turbo",
         temperature: 0.7
     })
-
-    // create prompt template
-    //     const prompt = ChatPromptTemplate.fromTemplate(`
-    //         Answer the user's question.
-    //         Context: {context}
-    //         Chat History: {chat_history}
-    //         Question: {input}
-    //    `);
     
     const prompt = ChatPromptTemplate.fromMessages([
         ["system","Answer the user's question based on the context: {context}."],
@@ -95,23 +106,25 @@ export const createChain = async (vectorStore) => {
     return conversationChain;
 }
 
+
 const chatHistory = [
     new HumanMessage("Hello"),
     new AIMessage("Hi, how can I help you?"),
     new HumanMessage("My Name is Ritik"),
     new AIMessage("Hi Ritik, how can I help you?"),
 ]
-// console.log(chatHistory)
+
+
 export const getResponse = async (chain, question) => {
 
     const response = await chain.invoke({
         input: question,
         chat_history: chatHistory
     })
-    console.log(chatHistory)
+    // console.log(chatHistory)
     chatHistory.push(new HumanMessage(question));
     chatHistory.push(new AIMessage(response.answer));
-    return { response: response.answer, newContext: response.context };
+    return { response: response.answer };
 }
 
 
