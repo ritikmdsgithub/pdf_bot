@@ -6,59 +6,70 @@ import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter'
 import { OpenAIEmbeddings } from '@langchain/openai'
 import { MemoryVectorStore } from 'langchain/vectorstores/memory'
 import { createRetrievalChain } from 'langchain/chains/retrieval'
-import { AIMessage, HumanMessage} from '@langchain/core/messages'
+import { AIMessage, HumanMessage } from '@langchain/core/messages'
 import { MessagesPlaceholder } from '@langchain/core/prompts'
 import { createHistoryAwareRetriever } from 'langchain/chains/history_aware_retriever'
 import { RedisVectorStore } from '@langchain/redis'
-import { createClient } from 'redis'
+import { createClient } from 'redis';
+import JSONCache from 'redis-json';
+import Redis from 'ioredis';
+
 
 
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
+const redis = new Redis();
 const client = createClient();
 await client.connect();
 
+export const isPdfIdPresent = async (pdfId) => {
+    const isPdfIdPresent = new RedisVectorStore(new OpenAIEmbeddings(),
+        {
+            redisClient: client,
+            indexName: pdfId,
+        }
+    )
 
-export const createVectorStore = async (conversationId,filePath) => {
+    return await isPdfIdPresent.checkIndexExists();
+}
 
+export const getVectorStoreFromRedis = async (pdfId) => {
     const vectorStoreFromRedis = new RedisVectorStore(new OpenAIEmbeddings(),
         {
             redisClient: client,
-            indexName: conversationId,
+            indexName: pdfId,
         }
-    ) 
-   
+    )
     const isVectorStorePresent = await vectorStoreFromRedis.checkIndexExists();
+    if (isVectorStorePresent) return vectorStoreFromRedis;
+}
 
-    if(isVectorStorePresent) {
-        return vectorStoreFromRedis;
-    } else {
-        const pdfLoader = new PDFLoader(filePath);
+export const createVectorStore = async (pdfId, filePath) => {
 
-        const docs = await pdfLoader.load();
-       
-        const splitter = new RecursiveCharacterTextSplitter({
-            chunkSize: 200,
-            chunkOverlap: 20
-        });
-    
-        const splitDocs = await splitter.splitDocuments(docs)
-        
-        const embeddings = new OpenAIEmbeddings();
-    
-        const vectorStore = await RedisVectorStore.fromDocuments(
-            splitDocs,
-            embeddings,
-            {
-                redisClient: client,
-                indexName: conversationId,
-            }
-        );
-        
-        return vectorStore; 
-    }
+    const pdfLoader = new PDFLoader(filePath);
+
+    const docs = await pdfLoader.load();
+
+    const splitter = new RecursiveCharacterTextSplitter({
+        chunkSize: 200,
+        chunkOverlap: 20
+    });
+
+    const splitDocs = await splitter.splitDocuments(docs)
+
+    const embeddings = new OpenAIEmbeddings();
+
+    const vectorStore = await RedisVectorStore.fromDocuments(
+        splitDocs,
+        embeddings,
+        {
+            redisClient: client,
+            indexName: pdfId,
+        }
+    );
+    return vectorStore;
 }
 
 
@@ -68,11 +79,11 @@ export const createChain = async (vectorStore) => {
         modelName: "gpt-3.5-turbo",
         temperature: 0.7
     })
-    
+
     const prompt = ChatPromptTemplate.fromMessages([
-        ["system","Answer the user's question based on the context: {context}."],
+        ["system", "Answer the user's question based on the context: {context}."],
         new MessagesPlaceholder("chat_history"),
-        ["user","{input}"]
+        ["user", "{input}"]
     ])
 
     // create a chain 
@@ -80,16 +91,16 @@ export const createChain = async (vectorStore) => {
         llm: model,
         prompt: prompt
     })
-    
+
     // retrieve the data
     const retriever = vectorStore.asRetriever({
         k: 3
     });
-    
+
     const retrieverPrompt = ChatPromptTemplate.fromMessages([
         new MessagesPlaceholder("chat_history"),
-        ["user","{input}"],
-        ["user","Given the above conversation, generate a search query to look up in order to get information relevant to the conversation"]
+        ["user", "{input}"],
+        ["user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation"]
     ])
 
     const historyAwareRetriever = await createHistoryAwareRetriever({
@@ -114,6 +125,40 @@ const chatHistory = [
     new AIMessage("Hi Ritik, how can I help you?"),
 ]
 
+export const isConversationIdPresentInRedis = async (conversationId) => {
+    
+    const isConversationIdPresent=await client.exists(`jc:${conversationId}`)
+    console.log(isConversationIdPresent)
+    if (isConversationIdPresent) return conversationId;
+
+}
+
+export const saveConversationInRedis = async (conversationId, data) => {
+
+    const jsonCache = new JSONCache(redis)
+    
+    await jsonCache.set(conversationId, data)
+
+    // console.log(data)
+    // const splitter = new RecursiveCharacterTextSplitter({
+    //     chunkSize: 200,
+    //     chunkOverlap: 20
+    // });
+
+    // const splitDocs = await splitter.splitDocuments(data)
+
+    // const embeddings = new OpenAIEmbeddings();
+
+    // const vectorStore = await RedisVectorStore.fromDocuments(
+    //     splitDocs,
+    //     embeddings,
+    //     {
+    //         redisClient: client,
+    //         indexName: conversationId,
+    //     }
+    // );
+}
+
 
 export const getResponse = async (chain, question) => {
 
@@ -121,11 +166,11 @@ export const getResponse = async (chain, question) => {
         input: question,
         chat_history: chatHistory
     })
-    // console.log(chatHistory)
+
     chatHistory.push(new HumanMessage(question));
     chatHistory.push(new AIMessage(response.answer));
     return { response: response.answer };
 }
 
 
-
+  
