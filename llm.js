@@ -11,18 +11,18 @@ import { MessagesPlaceholder } from '@langchain/core/prompts'
 import { createHistoryAwareRetriever } from 'langchain/chains/history_aware_retriever'
 import { RedisVectorStore } from '@langchain/redis'
 import { createClient } from 'redis';
-import JSONCache from 'redis-json';
-import Redis from 'ioredis';
-
+import { BufferMemory } from 'langchain/memory'
+import { UpstashRedisChatMessageHistory } from '@langchain/community/stores/message/upstash_redis'
+import { ConversationChain } from 'langchain/chains'
 
 
 import * as dotenv from 'dotenv';
 
 dotenv.config();
 
-const redis = new Redis();
 const client = createClient();
 await client.connect();
+
 
 export const isPdfIdPresent = async (pdfId) => {
     const isPdfIdPresent = new RedisVectorStore(new OpenAIEmbeddings(),
@@ -89,7 +89,7 @@ export const createChain = async (vectorStore) => {
     // create a chain 
     const chain = await createStuffDocumentsChain({
         llm: model,
-        prompt: prompt
+        prompt: prompt,
     })
 
     // retrieve the data
@@ -100,7 +100,12 @@ export const createChain = async (vectorStore) => {
     const retrieverPrompt = ChatPromptTemplate.fromMessages([
         new MessagesPlaceholder("chat_history"),
         ["user", "{input}"],
-        ["user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation"]
+        ["user", "Given the above conversation, generate a search query to look up in order to get information relevant to the conversation. Don't provide external information if you don,t know"],
+        ["user","Provide a brief summary of the preceding conversation or relevant context here."],
+        ["user",`1. Analyze the conversation to identify key topics, keywords, or questions discussed.
+        2. Generate a search query that captures the essence of the conversation and aims to retrieve additional information on the discussed topics.
+        3. Prioritize relevance and accuracy in the generated search query.
+        4. If uncertain, refrain from providing external information and focus on crafting an informative search query.`]
     ])
 
     const historyAwareRetriever = await createHistoryAwareRetriever({
@@ -111,66 +116,61 @@ export const createChain = async (vectorStore) => {
 
     const conversationChain = await createRetrievalChain({
         combineDocsChain: chain,
-        retriever: historyAwareRetriever
-
+        retriever: historyAwareRetriever,
     })
+
     return conversationChain;
 }
 
+// const chatHistory = [
+//     new HumanMessage("Hello"),
+//     new AIMessage("Hi, how can I help you?"),
+//     new HumanMessage("My Name is Ritik"),
+//     new AIMessage("Hi Ritik, how can I help you?"),
+// ]
 
-const chatHistory = [
-    new HumanMessage("Hello"),
-    new AIMessage("Hi, how can I help you?"),
-    new HumanMessage("My Name is Ritik"),
-    new AIMessage("Hi Ritik, how can I help you?"),
-]
+export const saveConversation = async (question, sessionId) => {
+    const chatMessageHistory = new UpstashRedisChatMessageHistory({
+        sessionId:sessionId,
+        config: {
+          url:process.env.UPSTASH_URL,
+          token: process.env.UPSTASH_TOKEN
+        },
+        sessionTTL:'',  
+    })
 
-export const isConversationIdPresentInRedis = async (conversationId) => {
+    const memory = new BufferMemory({
+        chatHistory: chatMessageHistory
+    })
     
-    const isConversationIdPresent=await client.exists(`jc:${conversationId}`)
-    console.log(isConversationIdPresent)
-    if (isConversationIdPresent) return conversationId;
+    const model = new ChatOpenAI({
+        modelName: "gpt-3.5-turbo",
+        temperature: 0.7
+    })
+    
+    const conversationChain = new ConversationChain({
+        llm:model,
+        memory
+    })
 
+    await conversationChain.invoke({
+            input: question,
+    });
+
+    return chatMessageHistory;
 }
 
-export const saveConversationInRedis = async (conversationId, data) => {
+export const getResponse = async (chain, question, sessionId) => {
 
-    const jsonCache = new JSONCache(redis)
-    
-    await jsonCache.set(conversationId, data)
+    const chatMessageHistory = await saveConversation(question, sessionId);
 
-    // console.log(data)
-    // const splitter = new RecursiveCharacterTextSplitter({
-    //     chunkSize: 200,
-    //     chunkOverlap: 20
-    // });
-
-    // const splitDocs = await splitter.splitDocuments(data)
-
-    // const embeddings = new OpenAIEmbeddings();
-
-    // const vectorStore = await RedisVectorStore.fromDocuments(
-    //     splitDocs,
-    //     embeddings,
-    //     {
-    //         redisClient: client,
-    //         indexName: conversationId,
-    //     }
-    // );
-}
-
-
-export const getResponse = async (chain, question) => {
-
+    const chatHistory = await chatMessageHistory.getMessages()
+   
     const response = await chain.invoke({
         input: question,
         chat_history: chatHistory
     })
-
-    chatHistory.push(new HumanMessage(question));
-    chatHistory.push(new AIMessage(response.answer));
     return { response: response.answer };
 }
 
 
-  
